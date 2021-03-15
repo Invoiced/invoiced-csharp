@@ -11,6 +11,8 @@ namespace Invoiced
         [JsonProperty("subject")] public string Subject { get; set; }
 
         [JsonProperty("message")] public string Message { get; set; }
+        
+        [JsonProperty("template")] public string Template {get; set;}
 
         [JsonProperty("type")] public string Type { get; set; }
 
