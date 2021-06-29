@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using System.Threading.Tasks;
 using Newtonsoft.Json;
 
 namespace Invoiced
@@ -9,8 +10,23 @@ namespace Invoiced
     {
         private bool _entityCreated;
         private Connection _connection;
+        private string _CurrentOperation;
         // used to determine safe json serialisation. should always be null outside function bodies
-        protected string CurrentOperation;
+        protected string CurrentOperation
+        {
+            get
+            {
+                return _CurrentOperation;
+            }
+            set
+            {
+                if (value != null && value.EndsWith("Async"))
+                    _CurrentOperation = value.Substring(0, value.Length - 5);
+                else
+                    _CurrentOperation = value;
+                    
+            }
+        }
         private string _endpointBase = "";
         protected string EntityName;
 
@@ -62,6 +78,261 @@ namespace Invoiced
         {
             _connection = conn;
         }
+
+        #region "Async Methods"
+
+        public virtual async System.Threading.Tasks.Task CreateAsync()
+        {
+            if (_entityCreated) throw new EntityException("Object has already been created.");
+
+            if (!HasCrud()) throw new EntityException("Create operation not supported on object.");
+
+            var url = GetEndpoint(false);
+            var entityJsonBody = ToJsonString();
+
+            var responseText = await _connection.PostAsync(url, null, entityJsonBody).ConfigureAwait(false);
+
+            try
+            {
+                JsonConvert.PopulateObject(responseText, this);
+            }
+            catch (Exception e)
+            {
+                throw new EntityException("", e);
+            }
+
+            _entityCreated = true;
+        }
+
+        public virtual async System.Threading.Tasks.Task SaveAllAsync()
+        {
+            if (!HasCrud()) throw new EntityException("Save operation not supported on object.");
+
+            var url = GetEndpoint(true);
+            var entityJsonBody = ToJsonString();
+            var responseText = await _connection.PatchAsync(url, entityJsonBody).ConfigureAwait(false);
+
+            try
+            {
+                JsonConvert.PopulateObject(responseText, this);
+            }
+            catch (Exception e)
+            {
+                throw new EntityException("", e);
+            }
+        }
+
+        public async System.Threading.Tasks.Task SaveAsync(string partialDataObject)
+        {
+            if (!HasCrud()) throw new EntityException("Save operation not supported on object.");
+
+            var url = GetEndpoint(true);
+            var responseText = await _connection.PatchAsync(url, partialDataObject).ConfigureAwait(false);
+
+            try
+            {
+                JsonConvert.PopulateObject(responseText, this);
+            }
+            catch (Exception e)
+            {
+                throw new EntityException("", e);
+            }
+        }
+
+        public Task<T> RetrieveAsync(long id)
+        {
+            return RetrieveAsync(id.ToString());
+        }
+
+        public async Task<T> RetrieveAsync(string id = null)
+        {
+            var url = GetEndpoint(false);
+
+            if (id != null) url += "/" + id;
+
+            var responseText = await _connection.GetAsync(url, null).ConfigureAwait(false);
+            T serializedObject;
+            try
+            {
+                serializedObject = JsonConvert.DeserializeObject<T>(responseText,
+                    new JsonSerializerSettings
+                    {
+                        NullValueHandling = NullValueHandling.Ignore,
+                        DefaultValueHandling = DefaultValueHandling.Ignore
+                    });
+                serializedObject._connection = _connection;
+            }
+            catch (Exception e)
+            {
+                throw new EntityException("", e);
+            }
+
+            return serializedObject;
+        }
+
+        public virtual async System.Threading.Tasks.Task DeleteAsync()
+        {
+            if (!HasCrud()) throw new EntityException("Delete operation not supported on object.");
+
+            await _connection.DeleteAsync(GetEndpoint(true)).ConfigureAwait(false);
+        }
+
+        public async Task<EntityList<T>> ListAsync(string nextUrl, Dictionary<string, object> queryParams,
+            JsonConverter customConverter = null)
+        {
+            if (!HasList()) throw new EntityException("List operation not supported on object.");
+
+            var url = GetEndpoint(false);
+
+            if (!string.IsNullOrEmpty(nextUrl)) url = nextUrl;
+
+            var response = await _connection.GetListAsync(url, queryParams).ConfigureAwait(false);
+
+            EntityList<T> entities;
+
+            var config = new JsonSerializerSettings
+            {
+                NullValueHandling = NullValueHandling.Ignore,
+                DefaultValueHandling = DefaultValueHandling.Ignore
+            };
+
+            try
+            {
+                if (customConverter != null) config.Converters.Add(customConverter);
+                entities = JsonConvert.DeserializeObject<EntityList<T>>(response.Result, config);
+
+                entities.LinkURLS = response.Links;
+                entities.TotalCount = response.TotalCount;
+            }
+            catch (Exception e)
+            {
+                throw new EntityException("", e);
+            }
+
+            foreach (var entity in entities) entity.ChangeConnection(_connection);
+
+            return entities;
+
+        }
+
+        public Task<EntityList<T>> ListAllAsync(Dictionary<string, object> queryParams, JsonConverter customConverter = null)
+        {
+            return ListAllAsync("", queryParams, customConverter);
+        }
+
+        public async Task<EntityList<T>> ListAllAsync(string nextUrl = "", Dictionary<string, object> queryParams = null,
+            JsonConverter customConverter = null)
+        {
+            EntityList<T> entities = null;
+
+            if (!HasList()) throw new EntityException("List operation not supported on object.");
+
+            do
+            {
+                var tmpEntities = await ListAsync(nextUrl, queryParams, customConverter).ConfigureAwait(false);
+
+                if (entities == null)
+                {
+                    entities = tmpEntities;
+                    if (tmpEntities.TotalCount > 0)
+                        entities.Capacity = tmpEntities.TotalCount;
+                }
+                else
+                {
+                    entities.AddRange(tmpEntities);
+                    entities.LinkURLS = tmpEntities.LinkURLS;
+                    entities.TotalCount = tmpEntities.TotalCount;
+                }
+
+                nextUrl = tmpEntities.GetNextURL();
+
+            } while (!string.IsNullOrEmpty(entities.GetNextURL()) && entities.GetSelfURL() != entities.GetLastURL());
+
+            return entities;
+        }
+
+        public async System.Threading.Tasks.Task VoidAsync()
+        {
+            if (!HasVoid()) throw new EntityException("Void operation not supported on object.");
+
+            var url = GetEndpoint(true) + "/void";
+
+            var responseText = await _connection.PostAsync(url, null, null).ConfigureAwait(false);
+
+            try
+            {
+                JsonConvert.PopulateObject(responseText, this);
+            }
+            catch (Exception e)
+            {
+                throw new EntityException("", e);
+            }
+        }
+
+        public async Task<IList<Attachment>> ListAttachmentsAsync()
+        {
+            if (!HasAttachments()) throw new EntityException("List attachments operation not supported on object.");
+
+            var url = GetEndpoint(true) + "/attachments";
+
+            var responseText = await _connection.GetAsync(url, null).ConfigureAwait(false);
+            return JsonConvert.DeserializeObject<IList<Attachment>>(responseText,
+                new JsonSerializerSettings
+                { NullValueHandling = NullValueHandling.Ignore, DefaultValueHandling = DefaultValueHandling.Ignore });
+        }
+
+        public async Task<IList<Email>> SendEmailAsync(EmailRequest emailRequest)
+        {
+            if (!HasSends()) throw new EntityException("Send email operation not supported on object.");
+
+            var url = GetEndpoint(true) + "/emails";
+
+            var jsonRequestBody = emailRequest.ToJsonString();
+
+            var responseText = await _connection.PostAsync(url, null, jsonRequestBody).ConfigureAwait(false);
+            return JsonConvert.DeserializeObject<IList<Email>>(responseText,
+                new JsonSerializerSettings
+                { NullValueHandling = NullValueHandling.Ignore, DefaultValueHandling = DefaultValueHandling.Ignore });
+        }
+
+        public async Task<Letter> SendLetterAsync(LetterRequest letterRequest = null)
+        {
+            if (!HasSends()) throw new EntityException("Send letter operation not supported on object.");
+
+            string responseText;
+
+            var url = GetEndpoint(true) + "/letters";
+
+            if (letterRequest != null)
+            {
+                var jsonRequestBody = letterRequest.ToJsonString();
+                responseText = await _connection.PostAsync(url, null, jsonRequestBody).ConfigureAwait(false);
+            }
+            else
+            {
+                responseText = _connection.Post(url, null, "");
+            }
+
+            return JsonConvert.DeserializeObject<Letter>(responseText,
+                new JsonSerializerSettings
+                { NullValueHandling = NullValueHandling.Ignore, DefaultValueHandling = DefaultValueHandling.Ignore });
+        }
+
+        public async Task<IList<TextMessage>> SendTextAsync(TextRequest textRequest)
+        {
+            if (!HasSends()) throw new EntityException("Send text message operation not supported on object.");
+
+            var url = GetEndpoint(true) + "/text_messages";
+
+            var jsonRequestBody = textRequest.ToJsonString();
+
+            var responseText = await _connection.PostAsync(url, null, jsonRequestBody).ConfigureAwait(false);
+            return JsonConvert.DeserializeObject<IList<TextMessage>>(responseText,
+                new JsonSerializerSettings
+                { NullValueHandling = NullValueHandling.Ignore, DefaultValueHandling = DefaultValueHandling.Ignore });
+        }
+
+        #endregion
 
         public virtual void Create()
         {
@@ -140,7 +411,8 @@ namespace Invoiced
                 serializedObject = JsonConvert.DeserializeObject<T>(responseText,
                     new JsonSerializerSettings
                     {
-                        NullValueHandling = NullValueHandling.Ignore, DefaultValueHandling = DefaultValueHandling.Ignore
+                        NullValueHandling = NullValueHandling.Ignore,
+                        DefaultValueHandling = DefaultValueHandling.Ignore
                     });
                 serializedObject._connection = _connection;
             }
@@ -159,7 +431,7 @@ namespace Invoiced
             _connection.Delete(GetEndpoint(true));
         }
 
-        private EntityList<T> List(string nextUrl, Dictionary<string, object> queryParams,
+        public EntityList<T> List(string nextUrl, Dictionary<string, object> queryParams,
             JsonConverter customConverter = null)
         {
             if (!HasList()) throw new EntityException("List operation not supported on object.");
@@ -174,7 +446,8 @@ namespace Invoiced
 
             var config = new JsonSerializerSettings
             {
-                NullValueHandling = NullValueHandling.Ignore, DefaultValueHandling = DefaultValueHandling.Ignore
+                NullValueHandling = NullValueHandling.Ignore,
+                DefaultValueHandling = DefaultValueHandling.Ignore
             };
 
             try
@@ -207,13 +480,15 @@ namespace Invoiced
 
             if (!HasList()) throw new EntityException("List operation not supported on object.");
 
-            var tmpEntities = List(nextUrl, queryParams, customConverter);
-
             do
             {
+                var tmpEntities = List(nextUrl, queryParams, customConverter);
+
                 if (entities == null)
                 {
                     entities = tmpEntities;
+                    if (tmpEntities.TotalCount > 0)
+                        entities.Capacity = tmpEntities.TotalCount;
                 }
                 else
                 {
@@ -221,6 +496,9 @@ namespace Invoiced
                     entities.LinkURLS = tmpEntities.LinkURLS;
                     entities.TotalCount = tmpEntities.TotalCount;
                 }
+
+                nextUrl = tmpEntities.GetNextURL();
+
             } while (!string.IsNullOrEmpty(entities.GetNextURL()) && entities.GetSelfURL() != entities.GetLastURL());
 
             return entities;
@@ -228,11 +506,11 @@ namespace Invoiced
 
         protected string ToJsonString([CallerMemberName] string enclosingFunction = "")
         {
-            if (enclosingFunction != "") CurrentOperation = enclosingFunction;
+            if (!string.IsNullOrEmpty(enclosingFunction)) CurrentOperation = enclosingFunction;
 
             var output = JsonConvert.SerializeObject(this, Formatting.Indented,
                 new JsonSerializerSettings
-                    {NullValueHandling = NullValueHandling.Ignore, DefaultValueHandling = DefaultValueHandling.Ignore});
+                { NullValueHandling = NullValueHandling.Ignore, DefaultValueHandling = DefaultValueHandling.Ignore });
 
             CurrentOperation = null;
             return output;
@@ -265,7 +543,7 @@ namespace Invoiced
             var responseText = _connection.Get(url, null);
             return JsonConvert.DeserializeObject<IList<Attachment>>(responseText,
                 new JsonSerializerSettings
-                    {NullValueHandling = NullValueHandling.Ignore, DefaultValueHandling = DefaultValueHandling.Ignore});
+                { NullValueHandling = NullValueHandling.Ignore, DefaultValueHandling = DefaultValueHandling.Ignore });
         }
 
         public IList<Email> SendEmail(EmailRequest emailRequest)
@@ -279,14 +557,14 @@ namespace Invoiced
             var responseText = _connection.Post(url, null, jsonRequestBody);
             return JsonConvert.DeserializeObject<IList<Email>>(responseText,
                 new JsonSerializerSettings
-                    {NullValueHandling = NullValueHandling.Ignore, DefaultValueHandling = DefaultValueHandling.Ignore});
+                { NullValueHandling = NullValueHandling.Ignore, DefaultValueHandling = DefaultValueHandling.Ignore });
         }
 
         public Letter SendLetter(LetterRequest letterRequest = null)
         {
             if (!HasSends()) throw new EntityException("Send letter operation not supported on object.");
 
-            string responseText = null;
+            string responseText;
 
             var url = GetEndpoint(true) + "/letters";
 
@@ -302,7 +580,7 @@ namespace Invoiced
 
             return JsonConvert.DeserializeObject<Letter>(responseText,
                 new JsonSerializerSettings
-                    {NullValueHandling = NullValueHandling.Ignore, DefaultValueHandling = DefaultValueHandling.Ignore});
+                { NullValueHandling = NullValueHandling.Ignore, DefaultValueHandling = DefaultValueHandling.Ignore });
         }
 
         public IList<TextMessage> SendText(TextRequest textRequest)
@@ -316,7 +594,7 @@ namespace Invoiced
             var responseText = _connection.Post(url, null, jsonRequestBody);
             return JsonConvert.DeserializeObject<IList<TextMessage>>(responseText,
                 new JsonSerializerSettings
-                    {NullValueHandling = NullValueHandling.Ignore, DefaultValueHandling = DefaultValueHandling.Ignore});
+                { NullValueHandling = NullValueHandling.Ignore, DefaultValueHandling = DefaultValueHandling.Ignore });
         }
 
         protected abstract string EntityId();

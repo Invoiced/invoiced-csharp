@@ -26,9 +26,9 @@ namespace Invoiced
         {
             var value = "";
 
-            if (LinkURLS == null) return value;
+            if (LinkURLS == null || !LinkURLS.ContainsKey(key)) return value;
 
-            LinkURLS.TryGetValue("self", out value);
+            LinkURLS.TryGetValue(key, out value);
             return value;
         }
     }
